@@ -944,9 +944,44 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp tool_call_arguments(_params), do: %{}
 
   defp send_message(port, message) do
-    line = Jason.encode!(message) <> "\n"
+    {safe_message, replacement_count} = sanitize_for_json(message)
+
+    if replacement_count > 0 do
+      Logger.warning("Sanitized invalid UTF-8 payload before JSON encoding replacements=#{replacement_count}")
+    end
+
+    line = Jason.encode!(safe_message) <> "\n"
     Port.command(port, line)
   end
+
+  defp sanitize_for_json(value) when is_binary(value) do
+    if String.valid?(value) do
+      {value, 0}
+    else
+      {String.replace_invalid(value, "�"), 1}
+    end
+  end
+
+  defp sanitize_for_json(value) when is_list(value) do
+    Enum.map_reduce(value, 0, fn item, replacement_count ->
+      {sanitized_item, item_replacements} = sanitize_for_json(item)
+      {sanitized_item, replacement_count + item_replacements}
+    end)
+  end
+
+  defp sanitize_for_json(value) when is_map(value) do
+    Enum.reduce(value, {%{}, 0}, fn {key, item}, {sanitized_map, replacement_count} ->
+      {sanitized_key, key_replacements} = sanitize_for_json(key)
+      {sanitized_item, item_replacements} = sanitize_for_json(item)
+
+      {
+        Map.put(sanitized_map, sanitized_key, sanitized_item),
+        replacement_count + key_replacements + item_replacements
+      }
+    end)
+  end
+
+  defp sanitize_for_json(value), do: {value, 0}
 
   defp needs_input?(method, payload)
        when is_binary(method) and is_map(payload) do
